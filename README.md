@@ -22,6 +22,7 @@ Config:
 - flush_operator: Operator between flush_interval and flush_count. (default AND)
 
 Example:
+
         [hdfs_output]
         type = "HDFSOutput"
         message_matcher = "Type == 'HDFS'"
