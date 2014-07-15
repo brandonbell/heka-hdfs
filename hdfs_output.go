@@ -8,6 +8,7 @@ import (
     . "github.com/mozilla-services/heka/pipeline"
     "github.com/gohadoop/webhdfs"
     "github.com/rafrombrc/go-notify"
+    "bitbucket.org/tebeka/strftime"
     "sync"
     "time"
 )
@@ -151,9 +152,14 @@ func (hdfs *HDFSOutput) hdfsWrite(data []byte) (ok bool, err error) {
     if err = hdfs.hdfsConnection(); err != nil {
         panic(fmt.Sprintf("HDFSOutput unable to reopen HDFS Connection: %s", err))
     }
+
+    path, err := strftime.Format(hdfs.Path, time.Now()); if err != nil { 
+        return
+    }
+
     ok, err = hdfs.fs.Create(
         bytes.NewReader(data),
-        webhdfs.Path{Name: hdfs.Path},
+        webhdfs.Path{Name: path},
         hdfs.Overwrite,
         hdfs.Blocksize,
         hdfs.Replication,
@@ -282,7 +288,7 @@ func (hdfs *HDFSOutput) committer(or OutputRunner, wg *sync.WaitGroup) {
         }
         ok, err = hdfs.hdfsWrite(outBatch)
         if err != nil {
-            or.LogError(fmt.Errorf("Can't write to %s: %s",  err, outBatch))
+            or.LogError(fmt.Errorf("Can't write to HDFS: %s",  err))
         }
         outBatch = outBatch[:0]
         hdfs.backChan <- outBatch
