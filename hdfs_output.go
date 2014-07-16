@@ -5,6 +5,7 @@ import (
     "bytes"
     "errors"
     "fmt"
+    "compress/gzip"
     . "github.com/mozilla-services/heka/pipeline"
     "github.com/gohadoop/webhdfs"
     "github.com/rafrombrc/go-notify"
@@ -30,6 +31,9 @@ type HDFSOutputConfig struct {
 
     // User to create connection with
     User string
+
+    // Compress output.  Currently only supports 'gzip'
+    Compression string
 
     // Connection timeout in seconds to HDFS (default 15)
     Timeout uint `toml:"timeout"`
@@ -155,6 +159,10 @@ func (hdfs *HDFSOutput) hdfsWrite(data []byte) (ok bool, err error) {
 
     path, err := strftime.Format(hdfs.Path, time.Now()); if err != nil { 
         return
+    }
+
+    if hdfs.Compression == "gzip" { 
+        path = path + ".gz"
     }
 
     ok, err = hdfs.fs.Create(
@@ -286,7 +294,15 @@ func (hdfs *HDFSOutput) committer(or OutputRunner, wg *sync.WaitGroup) {
         if !ok { 
             break
         }
-        ok, err = hdfs.hdfsWrite(outBatch)
+        if hdfs.Compression == "gzip" { 
+             var b bytes.Buffer
+             gz := gzip.NewWriter(&b)
+             gz.Write(outBatch)
+             gz.Close()
+             ok, err = hdfs.hdfsWrite(b.Bytes())
+        } else { 
+             ok, err = hdfs.hdfsWrite(outBatch)
+        } 
         if err != nil {
             or.LogError(fmt.Errorf("Can't write to HDFS: %s",  err))
         }

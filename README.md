@@ -15,6 +15,7 @@ Config:
 - perm: Permissions of file on HDFS. (default 0700)
 - overwrite: Overwrite file if it already exists. (default false)
 - blocksize: HDFS blocksize in bytes. (default 134217728 (128MB))
+- compression: Compress output file to HDFS.  Currently only 'gzip' is supported. (default nil)
 - replication: HDFS replication facter of file. (default 3)
 - buffersize: Size of buffer used in transferring data to HDFS. (default 4096)
 - flush_interval: Interval in milliseconds data should be written to HDFS. (default 60000)
@@ -32,5 +33,5 @@ Example:
 
 TODO
 =====
-1. Add dynamic configuration for output path.
-2. Add output compression.
+<del>1. Add dynamic configuration for output path.</del>
+<del>2. Add output compression.</del>
