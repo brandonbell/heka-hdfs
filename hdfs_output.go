@@ -1,27 +1,34 @@
-package hdfs_output
+package hdfs
 
 import (
     "os"
     "bytes"
     "errors"
     "fmt"
-    "compress/gzip"
     . "github.com/mozilla-services/heka/pipeline"
     "github.com/gohadoop/webhdfs"
-    "github.com/rafrombrc/go-notify"
     "bitbucket.org/tebeka/strftime"
-    "sync"
     "time"
+    "strconv"
 )
 
-// Output plugin that writes message contents to a file on HDFS.
 type HDFSOutput struct {
-    *HDFSOutputConfig
-    flushOpAnd bool
-    fs         *webhdfs.FileSystem
-    batchChan  chan []byte
-    backChan   chan []byte
-    timerChan  <-chan time.Time
+	*HDFSOutputConfig
+        fs *webhdfs.FileSystem
+}
+
+func (hdfs *HDFSOutput) ConfigStruct() interface{} {
+    return &HDFSOutputConfig{
+        Host:          "localhost:14000",
+        Timeout:       15,
+        KeepAlive:     false,
+        Perm:          0644,
+        Overwrite:     false,
+        Blocksize:     134217728,
+        Replication:   3,
+        Buffersize:    4096,
+        Timestamp:     false, 
+    }
 }
 
 // ConfigStruct for HDFSOutput plugin.
@@ -32,24 +39,27 @@ type HDFSOutputConfig struct {
     // User to create connection with
     User string
 
-    // Compress output.  Currently only supports 'gzip'
-    Compression string
-
     // Connection timeout in seconds to HDFS (default 15)
     Timeout uint `toml:"timeout"`
 
-    // DisableKeepAlives (default false).  
+    // DisableKeepAlives (default false).
     KeepAlive bool `toml:"keepalive"`
-   
+
     // Full output file path.
-    Path string 
+    Path string
+
+    // Append epoch in milliseconds.  E.g. /<path>/<on>/<hdfs>/syslog.1407245278657
+    Timestamp bool
+
+    // Extension to append to "Path".  This can be used to denote filetype.  
+    Extension string
 
     // Output file permissions (default "0700").
     Perm os.FileMode `toml:"perm"`
 
     // Overwrite HDFS file if exists (default false).
     Overwrite bool `toml:"overwrite"`
-  
+
     // Blocksize (default 134217728, (128MB)).
     Blocksize uint64 `toml:"blocksize"`
 
@@ -59,89 +69,39 @@ type HDFSOutputConfig struct {
     // Size of the buffer used in transferring data (default 4096).
     Buffersize uint `toml:"buffersize"`
 
-    // Interval at which accumulated file data should be written to HDFS, in
-    // milliseconds (default 1minute (60000)). Set to 0 to disable.
-    FlushInterval uint32 `toml:"flush_interval"`
-
-    // Number of messages to accumulate until file data should be written to
-    // HDFS (default 1, minimum 1).
-    FlushCount uint32 `toml:"flush_count"`
-
-    // Operator describing how the two parameters "flush_interval" and
-    // "flush_count" are combined. Allowed values are "AND" or "OR" (default is
-    // "AND").
-    FlushOperator string `toml:"flush_operator"`
-
     // Specifies whether or not Heka's stream framing will be applied to the
     // output. We do some magic to default to true if ProtobufEncoder is used,
     // false otherwise.
     UseFraming *bool `toml:"use_framing"`
 }
 
-func (hdfs *HDFSOutput) ConfigStruct() interface{} {
-    return &HDFSOutputConfig{
-        Host:          "localhost:14000",
-        Timeout:       15,
-        KeepAlive:     false, 
-        Perm:          0644,
-        Overwrite:     false,
-        Blocksize:     134217728,
-        Replication:   3, 
-        Buffersize:    4096,
-        FlushInterval: 60000,
-        FlushCount:    1,
-        FlushOperator: "AND",
-    }
-}
-
 func (hdfs *HDFSOutput) Init(config interface{}) (err error) {
     conf := config.(*HDFSOutputConfig)
     hdfs.HDFSOutputConfig = conf
 
-    // Allow setting of 0 to indicate default 
-    if conf.Blocksize < 0 { 
+    // Allow setting of 0 to indicate default
+    if conf.Blocksize < 0 {
         err = fmt.Errorf("Parameter 'blocksize' needs to be greater than 0.")
         return
     }
-
-    if conf.Timeout < 0 { 
+    if conf.Timeout < 0 {
         err = fmt.Errorf("Parameter 'timeout' needs to be greater than 0.")
         return
     }
-
-    if conf.Replication < 0 { 
+    if conf.Replication < 0 {
         err = fmt.Errorf("Parameter 'replication' needs to be greater than 0.")
         return
     }
-
-    if conf.Buffersize < 0 { 
+    if conf.Buffersize < 0 {
         err = fmt.Errorf("Parameter 'buffersize' needs to be greater than 0.")
         return
     }
 
-    if conf.FlushCount < 1 {
-        err = fmt.Errorf("Parameter 'flush_count' needs to be greater 1.")
-        return
-    }
-
-    switch conf.FlushOperator {
-    case "AND":
-        hdfs.flushOpAnd = true
-    case "OR":
-        hdfs.flushOpAnd = false
-    default:
-        err = fmt.Errorf("Parameter 'flush_operator' needs to be either 'AND' or 'OR', is currently: '%s'",
-            conf.FlushOperator)
-        return
-    }
-
-    hdfs.batchChan = make(chan []byte)
-    hdfs.backChan = make(chan []byte, 2) // Never block on the hand-back
     return
 }
 
-// Creates connection to HDFS.  
-func (hdfs *HDFSOutput) hdfsConnection() (err error) { 
+// Creates connection to HDFS.
+func (hdfs *HDFSOutput) hdfsConnection() (err error) {
     conf := *webhdfs.NewConfiguration()
     conf.Addr = hdfs.Host
     conf.User = hdfs.User
@@ -152,20 +112,25 @@ func (hdfs *HDFSOutput) hdfsConnection() (err error) {
 }
 
 // Writes to HDFS using go-webhdfs.Create
-func (hdfs *HDFSOutput) hdfsWrite(data []byte) (ok bool, err error) {
+func (hdfs *HDFSOutput) hdfsWrite(data []byte) (err error) {
     if err = hdfs.hdfsConnection(); err != nil {
         panic(fmt.Sprintf("HDFSOutput unable to reopen HDFS Connection: %s", err))
     }
 
-    path, err := strftime.Format(hdfs.Path, time.Now()); if err != nil { 
+    path, err := strftime.Format(hdfs.Path, time.Now()); if err != nil {
         return
     }
 
-    if hdfs.Compression == "gzip" { 
-        path = path + ".gz"
+    if hdfs.Timestamp == true { 
+        now := time.Now().UnixNano()
+        path = path + "." + strconv.FormatInt(now / 1e6, 10)
     }
 
-    ok, err = hdfs.fs.Create(
+    if hdfs.Extension != "" { 
+        path = path + "." + hdfs.Extension
+    }
+
+    _, err = hdfs.fs.Create(
         bytes.NewReader(data),
         webhdfs.Path{Name: path},
         hdfs.Overwrite,
@@ -174,143 +139,34 @@ func (hdfs *HDFSOutput) hdfsWrite(data []byte) (ok bool, err error) {
         hdfs.Perm,
         hdfs.Buffersize,
     )
-    
-    return
-}    
 
-func (hdfs *HDFSOutput) Run(or OutputRunner, h PluginHelper) (err error) {
-    enc := or.Encoder()
-    if enc == nil {
-        return errors.New("Encoder required.")
-    }
-    if hdfs.UseFraming == nil {
-        // Nothing was specified, we'll default to framing IFF ProtobufEncoder
-        // is being used.
-        if _, ok := enc.(*ProtobufEncoder); ok {
-            or.SetUseFraming(true)
-        }
-    }
-    var wg sync.WaitGroup
-    wg.Add(2)
-    go hdfs.receiver(or, &wg)
-    go hdfs.committer(or, &wg)
-    wg.Wait()
     return
 }
 
-// Runs in a separate goroutine, accepting incoming messages, buffering output
-// data until the ticker triggers the buffered data should be put onto the
-// committer channel.
-func (hdfs *HDFSOutput) receiver(or OutputRunner, wg *sync.WaitGroup) {
+func (hdfs *HDFSOutput) Run(or OutputRunner, h PluginHelper) (err error) {	
+    if or.Encoder() == nil {
+        return errors.New("Encoder must be specified.")
+    }
+
     var (
-        pack            *PipelinePack
-        e               error
-        timer           *time.Timer
-        timerDuration   time.Duration
-        msgCounter      uint32
-        intervalElapsed bool
-        outBytes        []byte
+        e error
+        outBytes []byte
     )
-    ok := true
-    outBatch := make([]byte, 0, 10000)
     inChan := or.InChan()
 
-    timerDuration = time.Duration(hdfs.FlushInterval) * time.Millisecond
-    if hdfs.FlushInterval > 0 {
-        timer = time.NewTimer(timerDuration)
-        hdfs.timerChan = timer.C
-    }
-
-    for ok {
-        select {
-        case pack, ok = <-inChan:
-            if !ok {
-                // Closed inChan => we're shutting down, flush data
-                if len(outBatch) > 0 {
-                    hdfs.batchChan <- outBatch
-                }
-                close(hdfs.batchChan)
-                break
-            }
-            if outBytes, e = or.Encode(pack); e != nil {
-                or.LogError(e)
-            } else {
-                outBatch = append(outBatch, outBytes...)
-                msgCounter++
-            }
-            pack.Recycle()
-
-            // Trigger immediately when the message count threshold has been
-            // reached if a) the "OR" operator is in effect or b) the
-            // flushInterval is 0 or c) the flushInterval has already elapsed.
-            // at least once since the last flush.
-            if msgCounter >= hdfs.FlushCount {
-                if !hdfs.flushOpAnd || hdfs.FlushInterval == 0 || intervalElapsed {
-                    // This will block until the other side is ready to accept
-                    // this batch, freeing us to start on the next one.
-                    hdfs.batchChan <- outBatch
-                    outBatch = <-hdfs.backChan
-                    msgCounter = 0
-                    intervalElapsed = false
-                    if timer != nil {
-                        timer.Reset(timerDuration)
-                    }
-                }
-            }
-        case <-hdfs.timerChan:
-            if (hdfs.flushOpAnd && msgCounter >= hdfs.FlushCount) ||
-                (!hdfs.flushOpAnd && msgCounter > 0) {
-
-                // This will block until the other side is ready to accept
-                // this batch, freeing us to start on the next one.
-                hdfs.batchChan <- outBatch
-                outBatch = <-hdfs.backChan
-                msgCounter = 0
-                intervalElapsed = false
-            } else {
-                intervalElapsed = true
-            }
-            timer.Reset(timerDuration)
+    for pack := range inChan {
+        outBytes, e = or.Encode(pack)
+	pack.Recycle()
+        if e != nil {
+            or.LogError(e)
+            continue
+        }
+        if e = hdfs.hdfsWrite(outBytes); e != nil {
+            or.LogError(e)
         }
     }
-    wg.Done()
-}
 
-// Runs in a separate goroutine, waits for buffered data on the committer
-// channel, writes it out to HDFS, and puts the now empty buffer on
-// the return channel for reuse.
-func (hdfs *HDFSOutput) committer(or OutputRunner, wg *sync.WaitGroup) {
-    initBatch := make([]byte, 0, 10000)
-    hdfs.backChan <- initBatch
-    var outBatch []byte
-    var err error
-
-    ok := true
-    hupChan := make(chan interface{})
-    notify.Start(RELOAD, hupChan)
-
-    for ok { 
-        outBatch, ok = <-hdfs.batchChan
-        if !ok { 
-            break
-        }
-        if hdfs.Compression == "gzip" { 
-             var b bytes.Buffer
-             gz := gzip.NewWriter(&b)
-             gz.Write(outBatch)
-             gz.Close()
-             ok, err = hdfs.hdfsWrite(b.Bytes())
-        } else { 
-             ok, err = hdfs.hdfsWrite(outBatch)
-        } 
-        if err != nil {
-            or.LogError(fmt.Errorf("Can't write to HDFS: %s",  err))
-        }
-        outBatch = outBatch[:0]
-        hdfs.backChan <- outBatch
-    }
-
-    wg.Done()
+    return
 }
 
 func init() {
@@ -318,3 +174,4 @@ func init() {
         return new(HDFSOutput)
     })
 }
+
