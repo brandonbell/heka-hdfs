@@ -6,11 +6,15 @@ import (
     "errors"
     "fmt"
     . "github.com/mozilla-services/heka/pipeline"
-    "github.com/gohadoop/webhdfs"
+    "github.com/brandonbell/webhdfs"
     "bitbucket.org/tebeka/strftime"
     "time"
     "strconv"
+    "regexp"
+    "strings"
 )
+
+var varMatcher *regexp.Regexp
 
 type HDFSOutput struct {
 	*HDFSOutputConfig
@@ -28,6 +32,7 @@ func (hdfs *HDFSOutput) ConfigStruct() interface{} {
         Replication:   3,
         Buffersize:    4096,
         Timestamp:     false, 
+        Interpolate:   false,
     }
 }
 
@@ -53,6 +58,10 @@ type HDFSOutputConfig struct {
 
     // Extension to append to "Path".  This can be used to denote filetype.  
     Extension string
+
+    // Interpolate Path from Fields. (default false).
+    // E.g. "/tmp/${server}.txt" -> "/tmp/web01.txt" where Field[server] = "web01"
+    Interpolate bool
 
     // Output file permissions (default "0700").
     Perm os.FileMode `toml:"perm"`
@@ -112,13 +121,20 @@ func (hdfs *HDFSOutput) hdfsConnection() (err error) {
 }
 
 // Writes to HDFS using go-webhdfs.Create
-func (hdfs *HDFSOutput) hdfsWrite(data []byte) (err error) {
+func (hdfs *HDFSOutput) hdfsWrite(data []byte, fields map[string]string) (err error) {
     if err = hdfs.hdfsConnection(); err != nil {
         panic(fmt.Sprintf("HDFSOutput unable to reopen HDFS Connection: %s", err))
     }
 
     path, err := strftime.Format(hdfs.Path, time.Now()); if err != nil {
         return
+    }
+
+    if hdfs.Interpolate == true {
+        matched := varMatcher.FindAllStringSubmatch(hdfs.Path, -1)
+        for _, entry := range matched { 
+            path = strings.Replace(path, entry[0], fields[entry[1]], -1)
+        }
     }
 
     if hdfs.Timestamp == true { 
@@ -152,16 +168,20 @@ func (hdfs *HDFSOutput) Run(or OutputRunner, h PluginHelper) (err error) {
         e error
         outBytes []byte
     )
+    fieldMap := make(map[string]string)
     inChan := or.InChan()
 
     for pack := range inChan {
         outBytes, e = or.Encode(pack)
+        for _, field := range pack.Message.Fields {
+            fieldMap[field.GetName()] = field.ValueString[0]
+        }
 	pack.Recycle()
         if e != nil {
             or.LogError(e)
             continue
         }
-        if e = hdfs.hdfsWrite(outBytes); e != nil {
+        if e = hdfs.hdfsWrite(outBytes, fieldMap); e != nil {
             or.LogError(e)
         }
     }
@@ -170,6 +190,7 @@ func (hdfs *HDFSOutput) Run(or OutputRunner, h PluginHelper) (err error) {
 }
 
 func init() {
+    varMatcher, _ = regexp.Compile("\\${(\\w+)}")
     RegisterPlugin("HDFSOutput", func() interface{} {
         return new(HDFSOutput)
     })
