@@ -10,6 +10,7 @@ Interpolate will replace variables in `path` with their corresponding field entr
 This adds functionality similar to Logstash, Flume, and Flutends HDFS outputs.  
 
 Example:
+
        The incoming pack has the following fields defined : Fields[server] = web01, Fields[date] = 2014-01-01
        If `path` is set to "/tmp/${date}/${server}.txt" and `interpolate` is set to true, the resulting `path` will become "hdfs:///tmp/2014-01-01/web01.txt".
 
@@ -38,5 +39,5 @@ Example:
         extension = "txt"
         timestamp = true
         encoder="encoder_payload"
-
+        
         The above configuration will output files in the following format /tmp/hdfs.<epochtime in ms>.txt
